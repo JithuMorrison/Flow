@@ -55,6 +55,7 @@
  */
 
 import React, { useState, useRef, useCallback, useMemo, useEffect } from "react";
+import * as pako from "pako";
 
 /* ============================================================
    1. NOISE ENGINE
@@ -1137,10 +1138,12 @@ function drawChunk(ctx, chunk, chunkTiles, tilePx, viewMode, sampleGrid) {
 const GRID_COLS = 7;
 const GRID_ROWS = 5;
 
+export { B, BIOME_DEFS, drawChunk, elevToMeters, makeThumbnail, generateChunkData };
+
 export default function AtlasEngine() {
   const [seed, setSeed] = useState(9842374);
   const [seedInput, setSeedInput] = useState("9842374");
-  const [chunkTiles, setChunkTiles] = useState(40);
+  const [chunkTiles, setChunkTiles] = useState(50);
   const [tilePxDetail, setTilePxDetail] = useState(11);
   const [chunks, setChunks] = useState({});
   const [anchors, setAnchors] = useState([]);
@@ -1148,10 +1151,18 @@ export default function AtlasEngine() {
   const [viewMode, setViewMode] = useState("terrain");
   const [center, setCenter] = useState({ cx: 0, cy: 0 });
   const [selected, setSelected] = useState({ cx: 0, cy: 0 });
-  const [showJSON, setShowJSON] = useState(false);
   const [showLegend, setShowLegend] = useState(false);
-  const [copyMsg, setCopyMsg] = useState("");
   const detailCanvasRef = useRef(null);
+
+  // Backend save state
+  const [mapId, setMapId] = useState(null);
+  const [savedKeys, setSavedKeys] = useState(new Set()); // keys already saved to backend
+  const [saveMsg, setSaveMsg] = useState("");
+
+  // Undo/Redo stacks (compressed for memory efficiency)
+  const [undoStack, setUndoStack] = useState([]); // [{type, keys, compressed, anchorsSnap}]
+  const [redoStack, setRedoStack] = useState([]);
+  const MAX_UNDO = 20;
 
   const cells = useMemo(() => {
     const out = [];
@@ -1166,9 +1177,73 @@ export default function AtlasEngine() {
     return out;
   }, [center]);
 
+  // --- Compressed Undo/Redo helpers ---
+  const compressChunks = useCallback((chunksObj, keys) => {
+    const subset = {};
+    for (const k of keys) {
+      subset[k] = chunksObj[k] || null; // null = didn't exist
+    }
+    const json = JSON.stringify(subset);
+    return pako.deflate(json); // returns Uint8Array
+  }, []);
+
+  const decompressChunks = useCallback((compressed) => {
+    const inflated = pako.inflate(compressed);
+    const json = new TextDecoder().decode(inflated);
+    return JSON.parse(json);
+  }, []);
+
+  const pushUndo = useCallback((type, keys, prevChunks, prevAnchors) => {
+    const compressed = compressChunks(prevChunks, keys);
+    setUndoStack((prev) => [...prev.slice(-(MAX_UNDO - 1)), { type, keys, compressed, anchorsSnap: prevAnchors }]);
+    setRedoStack([]); // clear redo on new action
+  }, [compressChunks, MAX_UNDO]);
+
+  const performUndo = useCallback(() => {
+    if (undoStack.length === 0) return;
+    const entry = undoStack[undoStack.length - 1];
+    // Save current state for redo before restoring
+    const redoCompressed = compressChunks(chunks, entry.keys);
+    setRedoStack((prev) => [...prev, { type: entry.type, keys: entry.keys, compressed: redoCompressed, anchorsSnap: anchors }]);
+    // Restore previous state
+    const prevChunks = decompressChunks(entry.compressed);
+    setChunks((cur) => {
+      const next = { ...cur };
+      for (const k of entry.keys) {
+        if (prevChunks[k] === null) delete next[k];
+        else next[k] = prevChunks[k];
+      }
+      return next;
+    });
+    setAnchors(entry.anchorsSnap);
+    setUndoStack((prev) => prev.slice(0, -1));
+  }, [undoStack, chunks, anchors, compressChunks, decompressChunks]);
+
+  const performRedo = useCallback(() => {
+    if (redoStack.length === 0) return;
+    const entry = redoStack[redoStack.length - 1];
+    // Save current state for undo before restoring
+    const undoCompressed = compressChunks(chunks, entry.keys);
+    setUndoStack((prev) => [...prev, { type: entry.type, keys: entry.keys, compressed: undoCompressed, anchorsSnap: anchors }]);
+    // Restore redo state
+    const redoChunks = decompressChunks(entry.compressed);
+    setChunks((cur) => {
+      const next = { ...cur };
+      for (const k of entry.keys) {
+        if (redoChunks[k] === null) delete next[k];
+        else next[k] = redoChunks[k];
+      }
+      return next;
+    });
+    setAnchors(entry.anchorsSnap);
+    setRedoStack((prev) => prev.slice(0, -1));
+  }, [redoStack, chunks, anchors, compressChunks, decompressChunks]);
+
   const generateChunk = useCallback((cx, cy, targetBiome) => {
     const key = `${cx},${cy}`;
     if (chunks[key]) { setSelected({ cx, cy }); return; }
+    // Push undo entry (previous state for this key)
+    pushUndo("single", [key], chunks, anchors);
     const painted = targetBiome && targetBiome !== "NATURAL" ? targetBiome : null;
     let nextAnchors = anchors;
     if (painted && !anchors.some((a) => a.cx === cx && a.cy === cy)) {
@@ -1180,15 +1255,17 @@ export default function AtlasEngine() {
     const thumb = makeThumbnail(data, chunkTiles);
     setChunks((prev) => ({ ...prev, [key]: { ...data, thumb, generatedAt: Date.now(), paintedBiome: painted } }));
     setSelected({ cx, cy });
-  }, [seed, chunkTiles, chunks, anchors]);
+  }, [seed, chunkTiles, chunks, anchors, pushUndo]);
 
   const generateAllVisible = useCallback(() => {
     let accAnchors = anchors;
     const accChunks = { ...chunks };
     const painted = paintBiome !== "NATURAL" ? paintBiome : null;
+    const newKeys = []; // track newly generated for undo
     for (const { cx, cy } of cells) {
       const key = `${cx},${cy}`;
       if (accChunks[key]) continue;
+      newKeys.push(key);
       if (painted && !accAnchors.some((a) => a.cx === cx && a.cy === cy)) {
         accAnchors = [...accAnchors, { cx, cy, biome: painted }];
       }
@@ -1197,20 +1274,30 @@ export default function AtlasEngine() {
       const thumb = makeThumbnail(data, chunkTiles);
       accChunks[key] = { ...data, thumb, generatedAt: Date.now(), paintedBiome: painted };
     }
+    if (newKeys.length > 0) pushUndo("batch", newKeys, chunks, anchors);
     setAnchors(accAnchors);
     setChunks(accChunks);
-  }, [cells, seed, chunkTiles, chunks, anchors, paintBiome]);
+  }, [cells, seed, chunkTiles, chunks, anchors, paintBiome, pushUndo]);
 
   const refreshVisible = useCallback(() => {
     const accChunks = { ...chunks };
+    const toRemove = [];
     for (const { cx, cy } of cells) {
       const key = `${cx},${cy}`;
       if (!accChunks[key]) continue; // Only refresh chunks that are already generated
+      toRemove.push(key);
       const world = { seed, chunkTiles, anchors };
       const data = generateChunkData(cx, cy, world, accChunks);
       const thumb = makeThumbnail(data, chunkTiles);
       const painted = anchors.find(a => a.cx === cx && a.cy === cy)?.biome || null;
       accChunks[key] = { ...data, thumb, generatedAt: Date.now(), paintedBiome: painted };
+    }
+    if (toRemove.length > 0) {
+      setSavedKeys((prev) => {
+        const next = new Set(prev);
+        toRemove.forEach((k) => next.delete(k));
+        return next;
+      });
     }
     setChunks(accChunks);
   }, [cells, seed, chunkTiles, chunks, anchors]);
@@ -1224,6 +1311,12 @@ export default function AtlasEngine() {
     const thumb = makeThumbnail(data, chunkTiles);
     const painted = anchors.find(a => a.cx === selected.cx && a.cy === selected.cy)?.biome || null;
     accChunks[key] = { ...data, thumb, generatedAt: Date.now(), paintedBiome: painted };
+    
+    setSavedKeys((prev) => {
+      const next = new Set(prev);
+      next.delete(key);
+      return next;
+    });
     setChunks(accChunks);
   }, [selected, seed, chunkTiles, chunks, anchors]);
 
@@ -1236,6 +1329,11 @@ export default function AtlasEngine() {
       return next;
     });
     setAnchors((prev) => prev.filter((a) => !(a.cx === cx && a.cy === cy)));
+    setSavedKeys((prev) => {
+      const next = new Set(prev);
+      next.delete(key);
+      return next;
+    });
   }, []);
 
   const resetWorld = useCallback((newSeed) => {
@@ -1277,44 +1375,137 @@ export default function AtlasEngine() {
   const selectedChunk = chunks[`${selected.cx},${selected.cy}`];
   const chunkCount = Object.keys(chunks).length;
 
-  const worldJSONString = useMemo(() => {
-    if (!showJSON) return "";
-    return JSON.stringify({ seed, chunkTiles, anchors, chunkCount, chunks }, null, 2);
-  }, [showJSON, seed, chunkTiles, anchors, chunks, chunkCount]);
+  // --- Backend Save/Load ---
+  // Initialize or create map on mount
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch("/api/maps");
+        const maps = await res.json();
+        if (maps.length > 0) {
+          // Load the most recent map
+          const m = maps[maps.length - 1];
+          setMapId(m.mapId);
+          setSeed(m.seed);
+          setSeedInput(String(m.seed));
+          setChunkTiles(m.chunkTiles || 50);
+          // Load stored chunks
+          const cRes = await fetch(`/api/maps/${m.mapId}/chunks`);
+          const { chunks: stored } = await cRes.json();
+          if (stored && Object.keys(stored).length > 0) {
+            // Regenerate thumbnails for loaded chunks
+            const loaded = {};
+            const sKeys = new Set();
+            for (const [key, data] of Object.entries(stored)) {
+              const thumb = makeThumbnail(data, m.chunkTiles || 50);
+              loaded[key] = { ...data, thumb, generatedAt: data.generatedAt || Date.now() };
+              sKeys.add(key);
+            }
+            setChunks(loaded);
+            setSavedKeys(sKeys);
+            // Restore anchors from loaded chunks
+            const loadedAnchors = [];
+            for (const [key, data] of Object.entries(loaded)) {
+              if (data.paintedBiome) {
+                const [cx, cy] = key.split(",").map(Number);
+                loadedAnchors.push({ cx, cy, biome: data.paintedBiome });
+              }
+            }
+            if (loadedAnchors.length > 0) setAnchors(loadedAnchors);
+          }
+        } else {
+          // Create a new map
+          const createRes = await fetch("/api/maps", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ seed, chunkTiles }),
+          });
+          const { mapId: newId } = await createRes.json();
+          setMapId(newId);
+        }
+      } catch (e) {
+        console.warn("Backend not available, running in offline mode:", e.message);
+      }
+    })();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const jsonSizeLabel = useMemo(() => {
-    if (!showJSON) return "";
-    const bytes = new Blob([worldJSONString]).size;
-    return bytes > 1024 * 1024 ? `${(bytes / (1024 * 1024)).toFixed(2)} MB` : `${(bytes / 1024).toFixed(1)} KB`;
-  }, [showJSON, worldJSONString]);
-
-  const downloadJSON = useCallback(() => {
-    const full = JSON.stringify({ seed, chunkTiles, anchors, chunks });
-    const blob = new Blob([full], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "world.json";
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  }, [seed, chunkTiles, anchors, chunks]);
-
-  const copyJSON = useCallback(() => {
-    const full = JSON.stringify({ seed, chunkTiles, anchors, chunks });
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(full).then(
-        () => { setCopyMsg("Copied"); setTimeout(() => setCopyMsg(""), 1500); },
-        () => { setCopyMsg("Copy failed — use Download instead"); setTimeout(() => setCopyMsg(""), 2000); }
-      );
-    } else {
-      setCopyMsg("Clipboard unavailable — use Download instead");
-      setTimeout(() => setCopyMsg(""), 2000);
+  const saveCell = useCallback(async () => {
+    if (!mapId) return;
+    const key = `${selected.cx},${selected.cy}`;
+    const chunk = chunks[key];
+    if (!chunk || savedKeys.has(key)) return;
+    try {
+      setSaveMsg("Saving...");
+      const res = await fetch(`/api/maps/${mapId}/chunks/${key}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(chunk),
+      });
+      const result = await res.json();
+      if (result.saved) {
+        setSavedKeys((prev) => new Set([...prev, key]));
+        setSaveMsg(`Saved (${(result.compressedSize / 1024).toFixed(1)} KB)`);
+      }
+    } catch (e) {
+      setSaveMsg("Save failed");
     }
-  }, [seed, chunkTiles, anchors, chunks]);
+    setTimeout(() => setSaveMsg(""), 2000);
+  }, [mapId, selected, chunks, savedKeys]);
 
-  const pan = (dx, dy) => setCenter((c) => ({ cx: c.cx + dx, cy: c.cy + dy }));
+  const saveVisible = useCallback(async () => {
+    if (!mapId) return;
+    const toSave = {};
+    const newKeys = [];
+    for (const { cx, cy } of cells) {
+      const key = `${cx},${cy}`;
+      if (chunks[key] && !savedKeys.has(key)) {
+        toSave[key] = chunks[key];
+        newKeys.push(key);
+      }
+    }
+    if (Object.keys(toSave).length === 0) { setSaveMsg("Nothing new to save"); setTimeout(() => setSaveMsg(""), 1500); return; }
+    try {
+      setSaveMsg("Saving...");
+      const res = await fetch(`/api/maps/${mapId}/chunks-batch`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chunks: toSave }),
+      });
+      const result = await res.json();
+      if (result.saved) {
+        setSavedKeys((prev) => new Set([...prev, ...newKeys]));
+        setSaveMsg(`Saved ${result.count} chunks`);
+      }
+    } catch (e) {
+      setSaveMsg("Save failed");
+    }
+    setTimeout(() => setSaveMsg(""), 2000);
+  }, [mapId, cells, chunks, savedKeys]);
+
+  // --- Keyboard Navigation ---
+  const pan = useCallback((dx, dy) => setCenter((c) => ({ cx: c.cx + dx, cy: c.cy + dy })), []);
+
+  useEffect(() => {
+    const handler = (e) => {
+      // Don't capture if user is typing in an input/select
+      if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT" || e.target.tagName === "TEXTAREA") return;
+      switch (e.key) {
+        case "ArrowUp": e.preventDefault(); pan(0, -1); break;
+        case "ArrowDown": e.preventDefault(); pan(0, 1); break;
+        case "ArrowLeft": e.preventDefault(); pan(-1, 0); break;
+        case "ArrowRight": e.preventDefault(); pan(1, 0); break;
+        case "z":
+          if (e.ctrlKey || e.metaKey) { e.preventDefault(); performUndo(); }
+          break;
+        case "y":
+          if (e.ctrlKey || e.metaKey) { e.preventDefault(); performRedo(); }
+          break;
+        default: break;
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [pan, performUndo, performRedo]);
 
   return (
     <div style={styles.root}>
@@ -1448,13 +1639,27 @@ export default function AtlasEngine() {
             </div>
           </div>
 
-          <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+          <div style={{ display: "flex", gap: 6, marginTop: 12, flexWrap: "wrap" }}>
             <button className="ae-btn primary" style={{ flex: 1 }} onClick={generateAllVisible}>
               Generate visible
             </button>
             <button className="ae-btn primary" style={{ flex: 1 }} onClick={refreshVisible}>
               Refresh visible
             </button>
+          </div>
+          <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
+            <button className="ae-btn" style={{ flex: 1 }} onClick={saveVisible} disabled={!mapId}>
+              💾 Save visible
+            </button>
+            <button className="ae-btn" style={{ flex: 1 }} onClick={performUndo} disabled={undoStack.length === 0} title="Undo (Ctrl+Z)">
+              ↩ Undo
+            </button>
+            <button className="ae-btn" style={{ flex: 1 }} onClick={performRedo} disabled={redoStack.length === 0} title="Redo (Ctrl+Y)">
+              ↪ Redo
+            </button>
+          </div>
+          {saveMsg && <div style={{ ...styles.label, color: "#c98a3e", marginTop: 6 }}>{saveMsg}</div>}
+          <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
             <button className="ae-btn" onClick={() => setShowLegend((v) => !v)}>
               {showLegend ? "Hide legend" : "Biome legend"}
             </button>
@@ -1472,21 +1677,30 @@ export default function AtlasEngine() {
           )}
 
           <div style={styles.footnote}>
-            {chunkCount} chunk{chunkCount === 1 ? "" : "s"} generated · seed {seed} · {anchors.length} biome anchor{anchors.length === 1 ? "" : "s"} ·
-            elevation/temperature/moisture are continuous functions of world coordinates, so borders never
-            show a seam. Rivers flow fully connected in most regions, with occasional dry-gap stretches in
-            a minority of them.
+            {chunkCount} chunk{chunkCount === 1 ? "" : "s"} generated · seed {seed} · {anchors.length} biome anchor{anchors.length === 1 ? "" : "s"}
+            {mapId && <> · map {mapId.slice(0, 8)}</>}
+            {undoStack.length > 0 && <> · {undoStack.length} undo</>}
           </div>
         </div>
 
-        {/* Right: detail viewport */}
+        {/* Right: detail viewport + stats */}
         <div style={styles.panel}>
           <div style={styles.panelHeader}>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <span>CHUNK DETAIL — ({selected.cx}, {selected.cy})</span>
-              <button className="ae-btn" onClick={refreshSelected} style={{ padding: "4px 8px" }} disabled={!chunks[`${selected.cx},${selected.cy}`]}>
+              <button className="ae-btn" onClick={refreshSelected} style={{ padding: "4px 8px" }} disabled={!selectedChunk}>
                 Refresh
               </button>
+              {selectedChunk && (
+                <button
+                  className="ae-btn primary"
+                  onClick={saveCell}
+                  style={{ padding: "4px 8px" }}
+                  disabled={!mapId || savedKeys.has(`${selected.cx},${selected.cy}`)}
+                >
+                  {savedKeys.has(`${selected.cx},${selected.cy}`) ? "✓ Saved" : "💾 Save cell"}
+                </button>
+              )}
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
               <span style={styles.label}>VIEW</span>
@@ -1510,61 +1724,42 @@ export default function AtlasEngine() {
             </div>
           </div>
 
-          <div style={styles.canvasWrap} className="ae-scroll">
-            {selectedChunk ? (
-              <canvas ref={detailCanvasRef} style={{ imageRendering: "pixelated", display: "block" }} />
-            ) : (
-              <div style={styles.emptyState}>
-                <div style={{ fontSize: 28, marginBottom: 8 }}>⛭</div>
-                <div>Chunk ({selected.cx}, {selected.cy}) hasn't been surveyed yet.</div>
-                <button className="ae-btn primary" style={{ marginTop: 12 }} onClick={() => generateChunk(selected.cx, selected.cy, paintBiome)}>
-                  Generate this chunk
-                </button>
+          <div style={styles.detailRow}>
+            <div style={styles.canvasWrap} className="ae-scroll">
+              {selectedChunk ? (
+                <canvas ref={detailCanvasRef} style={{ imageRendering: "pixelated", display: "block" }} />
+              ) : (
+                <div style={styles.emptyState}>
+                  <div style={{ fontSize: 28, marginBottom: 8 }}>⛭</div>
+                  <div>Chunk ({selected.cx}, {selected.cy}) hasn't been surveyed yet.</div>
+                  <button className="ae-btn primary" style={{ marginTop: 12 }} onClick={() => generateChunk(selected.cx, selected.cy, paintBiome)}>
+                    Generate this chunk
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {selectedChunk && (
+              <div style={styles.statsColumn}>
+                <Stat label="Dominant biome" value={selectedChunk.stats.dominantBiome} />
+                <Stat label="Painted target" value={selectedChunk.paintedBiome ? BIOME_DEFS[B[selectedChunk.paintedBiome]].name : "— natural —"} />
+                <Stat label="Elevation range" value={`${selectedChunk.stats.elevMin} → ${selectedChunk.stats.elevMax}`} />
+                <Stat label="Peak height" value={`${elevToMeters(selectedChunk.stats.elevMax)} m`} />
+                <Stat label="River / lake tiles" value={`${selectedChunk.stats.riverTiles} / ${selectedChunk.stats.lakeTiles}`} />
+                <Stat label="Objects placed" value={selectedChunk.stats.objectCount} />
+                <Stat label="Status" value={savedKeys.has(`${selected.cx},${selected.cy}`) ? "✓ Saved" : "Unsaved"} />
               </div>
             )}
           </div>
-
-          {selectedChunk && (
-            <div style={styles.statsGrid}>
-              <Stat label="Dominant biome" value={selectedChunk.stats.dominantBiome} />
-              <Stat label="Painted target" value={selectedChunk.paintedBiome ? BIOME_DEFS[B[selectedChunk.paintedBiome]].name : "— natural —"} />
-              <Stat label="Elevation range" value={`${selectedChunk.stats.elevMin} → ${selectedChunk.stats.elevMax}`} />
-              <Stat label="Peak height" value={`${elevToMeters(selectedChunk.stats.elevMax)} m`} />
-              <Stat label="River / lake tiles" value={`${selectedChunk.stats.riverTiles} / ${selectedChunk.stats.lakeTiles}`} />
-              <Stat label="Objects placed" value={selectedChunk.stats.objectCount} />
-              <Stat
-                label="Seam check"
-                value={["n", "s", "e", "w"].map((d) => (selectedChunk.neighborsAtGeneration[d] ? `${d.toUpperCase()}✓` : null)).filter(Boolean).join(" ") || "no generated neighbors yet"}
-                wide
-              />
-            </div>
-          )}
-
-          <div style={styles.jsonToggleRow}>
-            <button className="ae-btn" onClick={() => setShowJSON((v) => !v)}>
-              {showJSON ? "Hide world.json" : "View world.json"}
-            </button>
-            {showJSON && (
-              <>
-                <span style={styles.label}>{jsonSizeLabel}</span>
-                <button className="ae-btn" onClick={downloadJSON}>⬇ Download</button>
-                <button className="ae-btn" onClick={copyJSON}>⧉ Copy</button>
-                {copyMsg && <span style={{ ...styles.label, color: "#c98a3e" }}>{copyMsg}</span>}
-              </>
-            )}
-          </div>
-          {showJSON && (
-            <pre style={styles.jsonBox} className="ae-scroll">{worldJSONString}</pre>
-          )}
         </div>
       </div>
     </div>
   );
 }
 
-function Stat({ label, value, wide }) {
+function Stat({ label, value }) {
   return (
-    <div style={{ ...styles.statCard, gridColumn: wide ? "1 / -1" : "auto" }}>
+    <div style={styles.statCard}>
       <div style={styles.statLabel}>{label}</div>
       <div style={styles.statValue}>{value}</div>
     </div>
@@ -1577,12 +1772,13 @@ function Stat({ label, value, wide }) {
 
 const styles = {
   root: {
-    minHeight: "100vh", width: "100%", background: "#14171a", color: "#e7e2d3",
-    fontFamily: "'Inter', sans-serif", padding: 16, display: "flex", flexDirection: "column", gap: 14,
+    height: "100vh", width: "100vw", background: "#14171a", color: "#e7e2d3",
+    fontFamily: "'Inter', sans-serif", padding: "8px 12px", display: "flex", flexDirection: "column",
+    overflow: "hidden",
   },
   header: {
     display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10,
-    paddingBottom: 14, borderBottom: "1px solid #2a2f33",
+    paddingBottom: 8, borderBottom: "1px solid #2a2f33", flexShrink: 0,
   },
   wordmark: {
     fontFamily: "'Fraunces', serif", fontWeight: 600, fontSize: 22, letterSpacing: "0.02em", color: "#e7e2d3",
@@ -1594,21 +1790,24 @@ const styles = {
     fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: "#8a9099", letterSpacing: "0.05em",
   },
   body: {
-    display: "grid", gridTemplateColumns: "minmax(320px, 420px) 1fr", gap: 14, alignItems: "start",
+    display: "grid", gridTemplateColumns: "minmax(300px, 380px) 1fr", gap: 10,
+    flex: 1, overflow: "hidden", marginTop: 8,
   },
   panel: {
-    background: "#1a1d20", border: "1px solid #2a2f33", borderRadius: 6, padding: 14,
+    background: "#1a1d20", border: "1px solid #2a2f33", borderRadius: 6, padding: 12,
+    overflow: "auto", display: "flex", flexDirection: "column",
   },
   panelHeader: {
-    display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12,
+    display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10,
     fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: "0.06em", color: "#c98a3e",
+    flexShrink: 0, flexWrap: "wrap", gap: 6,
   },
   coordReadout: { color: "#8a9099" },
   paintRow: { display: "flex", alignItems: "center", gap: 8, marginBottom: 6 },
   paintSwatch: { width: 16, height: 16, borderRadius: 3, flexShrink: 0 },
   paintHint: {
     fontSize: 10.5, lineHeight: 1.4, color: "#6b7178", fontFamily: "'IBM Plex Mono', monospace",
-    marginBottom: 12,
+    marginBottom: 10,
   },
   chartWrap: { position: "relative" },
   panDial: {
@@ -1644,19 +1843,23 @@ const styles = {
   legendRow: { display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "#c7c2b3" },
   legendSwatch: { width: 10, height: 10, borderRadius: 2, flexShrink: 0, border: "1px solid rgba(255,255,255,0.15)" },
   footnote: {
-    marginTop: 12, fontSize: 10.5, lineHeight: 1.5, color: "#6b7178",
-    fontFamily: "'IBM Plex Mono', monospace", borderTop: "1px solid #2a2f33", paddingTop: 10,
+    marginTop: 10, fontSize: 10.5, lineHeight: 1.5, color: "#6b7178",
+    fontFamily: "'IBM Plex Mono', monospace", borderTop: "1px solid #2a2f33", paddingTop: 8,
+  },
+  detailRow: {
+    display: "flex", gap: 12, flex: 1, minHeight: 0,
   },
   canvasWrap: {
-    background: "#0d0f10", border: "1px solid #2a2f33", borderRadius: 4, minHeight: 320, maxHeight: 520,
+    background: "#0d0f10", border: "1px solid #2a2f33", borderRadius: 4, minHeight: 300,
     overflow: "auto", display: "flex", alignItems: "center", justifyContent: "center", padding: 8,
+    flex: 1,
+  },
+  statsColumn: {
+    display: "flex", flexDirection: "column", gap: 8, width: 180, flexShrink: 0,
   },
   emptyState: {
     display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
     color: "#6b7178", fontSize: 13, textAlign: "center", padding: 30, fontFamily: "'IBM Plex Mono', monospace",
-  },
-  statsGrid: {
-    marginTop: 12, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8,
   },
   statCard: {
     background: "#14171a", border: "1px solid #2a2f33", borderRadius: 4, padding: "8px 10px",
@@ -1665,10 +1868,4 @@ const styles = {
     fontSize: 9.5, color: "#8a9099", fontFamily: "'IBM Plex Mono', monospace", letterSpacing: "0.05em", marginBottom: 3,
   },
   statValue: { fontSize: 13, color: "#e7e2d3", fontWeight: 600 },
-  jsonToggleRow: { marginTop: 14, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" },
-  jsonBox: {
-    marginTop: 8, background: "#0d0f10", border: "1px solid #2a2f33", borderRadius: 4, padding: 10,
-    fontSize: 10.5, lineHeight: 1.5, color: "#9ad1a8", fontFamily: "'IBM Plex Mono', monospace",
-    maxHeight: 260, overflow: "auto", whiteSpace: "pre",
-  },
 };

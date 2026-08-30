@@ -1,17 +1,20 @@
-import { useState } from 'react'
-import heroImg from './assets/hero.png'
-import reactLogo from './assets/react.svg'
-import viteLogo from './assets/vite.svg'
-import './App.css'
+import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import AtlasEngine from './WorldGen'
+import MapViewer from './MapViewer'
+import FlowEntry from './FlowEntry'
+import FlowRegister from './Register'
 
 function App() {
-  const [count, setCount] = useState(0)
-
   return (
-    <>
-      <AtlasEngine/>
-    </>
+    <BrowserRouter>
+      <Routes>
+        <Route path="/" element={<FlowEntry />} />
+        <Route path="/register" element={<FlowRegister />} />
+        <Route path="/engine" element={<AtlasEngine />} />
+        <Route path="/viewer" element={<MapViewer />} />
+        <Route path="*" element={<h1>404 Not Found</h1>} />
+      </Routes>
+    </BrowserRouter>
   )
 }
 
