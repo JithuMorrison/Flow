@@ -37,20 +37,20 @@ if (!fs.existsSync(DATA_DIR)) {
 // Setup SQLite Database
 const db = new Database(path.join(DATA_DIR, 'flow.db'));
 
-// To ensure schema is updated if it exists, we drop chunks if we are changing its structure (for dev only)
-// Commented out to avoid data loss, but schema is updated below.
+// To ensure schema is updated if it exists, we alter chunks if we are changing its structure (for dev only)
 db.exec(`
   CREATE TABLE IF NOT EXISTS maps (
     id TEXT PRIMARY KEY,
     seed INTEGER,
     chunkTiles INTEGER,
-    anchors TEXT,
+    frozen INTEGER DEFAULT 0,
     createdAt TEXT
   );
 
   CREATE TABLE IF NOT EXISTS chunks (
     latlong TEXT PRIMARY KEY,
     map_id TEXT,
+    target INTEGER,
     world INTEGER DEFAULT 1,
     layer INTEGER DEFAULT 1,
     data BLOB,
@@ -58,6 +58,12 @@ db.exec(`
   );
 
   CREATE INDEX IF NOT EXISTS idx_chunks_latlong ON chunks(latlong);
+  
+  CREATE TABLE IF NOT EXISTS refreshes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    anchors TEXT,
+    created_at TEXT
+  );
 
   CREATE TABLE IF NOT EXISTS users (
     name TEXT PRIMARY KEY,
@@ -68,6 +74,9 @@ db.exec(`
     created_at TEXT
   );
 `);
+
+// Safe migrations for existing DBs if needed (ignore errors if columns exist or missing)
+try { db.exec("ALTER TABLE chunks ADD COLUMN target INTEGER;"); } catch(e){}
 
 // Setup Socket.io connections
 io.on("connection", (socket) => {
@@ -238,27 +247,40 @@ app.get('/api/users/:name', (req, res) => {
   }
 });
 
+app.patch('/api/users/:name', (req, res) => {
+  try {
+    const { name } = req.params;
+    const { map_id } = req.body;
+    if (map_id) {
+      db.prepare('UPDATE users SET map_id = ? WHERE name = ?').run(map_id, name);
+    }
+    res.json({ saved: true });
+  } catch (err) {
+    console.error('Error updating user:', err);
+    res.status(500).json({ error: 'Failed to update user' });
+  }
+});
+
 
 /**
  * MAPS API
  */
 app.post('/api/maps', (req, res) => {
   try {
-    const { seed, chunkTiles, anchors } = req.body;
+    const { seed, chunkTiles } = req.body;
     const mapId = crypto.randomUUID();
 
     const meta = {
       mapId,
       seed: seed ?? null,
       chunkTiles: chunkTiles ?? null,
-      anchors: anchors ?? [],
       createdAt: new Date().toISOString()
     };
 
     db.prepare(`
-      INSERT INTO maps (id, seed, chunkTiles, anchors, createdAt)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(mapId, meta.seed, meta.chunkTiles, JSON.stringify(meta.anchors), meta.createdAt);
+      INSERT INTO maps (id, seed, chunkTiles, createdAt)
+      VALUES (?, ?, ?, ?)
+    `).run(mapId, meta.seed, meta.chunkTiles, meta.createdAt);
 
     res.status(201).json({ mapId });
   } catch (err) {
@@ -273,7 +295,7 @@ app.get('/api/maps', (req, res) => {
       mapId: m.id,
       seed: m.seed,
       chunkTiles: m.chunkTiles,
-      anchors: JSON.parse(m.anchors || '[]'),
+      frozen: !!m.frozen,
       createdAt: m.createdAt
     }));
     res.json(maps);
@@ -293,7 +315,7 @@ app.get('/api/maps/:id', (req, res) => {
       mapId: m.id,
       seed: m.seed,
       chunkTiles: m.chunkTiles,
-      anchors: JSON.parse(m.anchors || '[]'),
+      frozen: !!m.frozen,
       createdAt: m.createdAt
     });
   } catch (err) {
@@ -302,21 +324,34 @@ app.get('/api/maps/:id', (req, res) => {
   }
 });
 
+app.put('/api/maps/:id/frozen', (req, res) => {
+  try {
+    const { id } = req.params;
+    const { frozen } = req.body;
+    db.prepare('UPDATE maps SET frozen = ? WHERE id = ?').run(frozen ? 1 : 0, id);
+    io.emit('mapMetaChanged', { mapId: id, frozen: !!frozen });
+    res.json({ saved: true });
+  } catch (err) {
+    console.error('Error updating map frozen state:', err);
+    res.status(500).json({ error: 'Failed to update map frozen state' });
+  }
+});
+
 app.put('/api/maps/:id/chunks/:key', async (req, res) => {
   try {
     const { id, key } = req.params;
-    const chunkData = req.body;
-
-    const jsonBuffer = Buffer.from(JSON.stringify(chunkData));
-    const compressed = await gzipAsync(jsonBuffer);
+    const { target, refresh_ids } = req.body;
+    
+    // Store as plain JSON string instead of gzip to save CPU overhead
+    const dataString = JSON.stringify({ refresh_ids: refresh_ids || [] });
 
     db.prepare(`
-      INSERT INTO chunks (latlong, map_id, data)
-      VALUES (?, ?, ?)
-      ON CONFLICT(latlong) DO UPDATE SET data = excluded.data, map_id = excluded.map_id
-    `).run(key, id, compressed);
+      INSERT INTO chunks (latlong, map_id, target, data)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(latlong) DO UPDATE SET target = excluded.target, data = excluded.data, map_id = excluded.map_id
+    `).run(key, id, target !== null ? target : null, dataString);
 
-    res.json({ saved: true, key, compressedSize: compressed.length });
+    res.json({ saved: true, key });
   } catch (err) {
     console.error('Error saving chunk:', err);
     res.status(500).json({ error: 'Failed to save chunk' });
@@ -334,25 +369,23 @@ app.put('/api/maps/:id/chunks-batch', async (req, res) => {
 
     const keys = Object.keys(chunks);
     const stmt = db.prepare(`
-      INSERT INTO chunks (latlong, map_id, data)
-      VALUES (?, ?, ?)
-      ON CONFLICT(latlong) DO UPDATE SET data = excluded.data, map_id = excluded.map_id
+      INSERT INTO chunks (latlong, map_id, target, data)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(latlong) DO UPDATE SET target = excluded.target, data = excluded.data, map_id = excluded.map_id
     `);
     
-    // Compress all first, then insert synchronously
-    const preparedChunks = await Promise.all(
-      keys.map(async (key) => {
-        const jsonBuffer = Buffer.from(JSON.stringify(chunks[key]));
-        const compressed = await gzipAsync(jsonBuffer);
-        return { key, compressed };
-      })
-    );
+    const items = [];
+    for (const key of keys) {
+      const chunk = chunks[key];
+      const dataString = JSON.stringify({ refresh_ids: chunk.refresh_ids || [] });
+      items.push({ key, target: chunk.target !== null ? chunk.target : null, dataString });
+    }
 
-    db.transaction((data) => {
-      for (const item of data) {
-        stmt.run(item.key, id, item.compressed);
+    db.transaction((batch) => {
+      for (const item of batch) {
+        stmt.run(item.key, id, item.target, item.dataString);
       }
-    })(preparedChunks);
+    })(items);
 
     res.json({ saved: true, count: keys.length, keys });
   } catch (err) {
@@ -361,15 +394,28 @@ app.put('/api/maps/:id/chunks-batch', async (req, res) => {
   }
 });
 
+async function parseChunkData(data) {
+  if (!data) return { refresh_ids: [] };
+  // Legacy support for buffers (gzipped)
+  if (Buffer.isBuffer(data)) {
+    const decompressed = await gunzipAsync(data);
+    return JSON.parse(decompressed.toString('utf-8'));
+  }
+  return JSON.parse(data);
+}
+
 app.get('/api/maps/:id/chunks/:key', async (req, res) => {
   try {
     const { id, key } = req.params;
-    const row = db.prepare('SELECT data FROM chunks WHERE latlong = ?').get(key);
+    const row = db.prepare('SELECT target, data FROM chunks WHERE latlong = ? AND map_id = ?').get(key, id);
     
     if (!row) return res.status(404).json({ error: 'Chunk not found' });
 
-    const decompressed = await gunzipAsync(row.data);
-    const chunkData = JSON.parse(decompressed.toString('utf-8'));
+    let chunkData = { target: row.target, refresh_ids: [] };
+    if (row.data) {
+       const parsed = await parseChunkData(row.data);
+       chunkData.refresh_ids = parsed.refresh_ids || [];
+    }
     res.json(chunkData);
   } catch (err) {
     console.error('Error fetching chunk:', err);
@@ -377,20 +423,128 @@ app.get('/api/maps/:id/chunks/:key', async (req, res) => {
   }
 });
 
-app.get('/api/maps/:id/chunks', async (req, res) => {
+// Endpoint to fetch ONLY requested chunks for scalable loading
+app.post('/api/maps/:id/chunks-fetch', async (req, res) => {
   try {
-    const rows = db.prepare('SELECT latlong, data FROM chunks').all();
+    const { id } = req.params;
+    const { keys } = req.body;
+    if (!keys || !Array.isArray(keys)) return res.status(400).json({ error: 'Invalid keys array' });
+
+    // Use IN clause
+    const placeholders = keys.map(() => '?').join(',');
+    const rows = db.prepare(`SELECT latlong, target, data FROM chunks WHERE map_id = ? AND latlong IN (${placeholders})`).all(id, ...keys);
 
     const chunks = {};
-    await Promise.all(rows.map(async (row) => {
-      const decompressed = await gunzipAsync(row.data);
-      chunks[row.latlong] = JSON.parse(decompressed.toString('utf-8'));
-    }));
+    for (const row of rows) {
+      let refresh_ids = [];
+      if (row.data) {
+        const parsed = await parseChunkData(row.data);
+        refresh_ids = parsed.refresh_ids || [];
+      }
+      chunks[row.latlong] = { target: row.target, refresh_ids };
+    }
+    res.json({ chunks });
+  } catch (err) {
+    console.error('Error fetching chunks batch:', err);
+    res.status(500).json({ error: 'Failed to fetch chunks batch' });
+  }
+});
 
+// Legacy all chunks (for Atlas Engine initialization)
+app.get('/api/maps/:id/chunks', async (req, res) => {
+  try {
+    const { id } = req.params;
+    // Note: SELECT * could be heavy at 1 trillion chunks. Atlas Engine should also move to lazy load eventually!
+    const rows = db.prepare('SELECT latlong, target, data FROM chunks WHERE map_id = ?').all(id);
+
+    const chunks = {};
+    for (const row of rows) {
+      let refresh_ids = [];
+      if (row.data) {
+        const parsed = await parseChunkData(row.data);
+        refresh_ids = parsed.refresh_ids || [];
+      }
+      chunks[row.latlong] = { target: row.target, refresh_ids };
+    }
     res.json({ chunks });
   } catch (err) {
     console.error('Error fetching chunks:', err);
     res.status(500).json({ error: 'Failed to fetch chunks' });
+  }
+});
+
+app.post('/api/maps/:id/refresh', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { anchors } = req.body;
+    
+    // anchors is now the compressed string array/format
+    const info = db.prepare(`
+      INSERT INTO refreshes (anchors, created_at)
+      VALUES (?, datetime('now'))
+    `).run(JSON.stringify(anchors || []));
+    
+    res.json({ id: info.lastInsertRowid });
+  } catch (err) {
+    console.error('Error creating refresh event:', err);
+    res.status(500).json({ error: 'Failed to create refresh event' });
+  }
+});
+
+// Endpoint to fetch ONLY specific refresh IDs
+app.post('/api/refreshes-fetch', async (req, res) => {
+  try {
+    const { ids } = req.body;
+    if (!ids || !Array.isArray(ids)) return res.status(400).json({ error: 'Invalid ids array' });
+    if (ids.length === 0) return res.json({ refreshes: [] });
+
+    const placeholders = ids.map(() => '?').join(',');
+    const rows = db.prepare(`SELECT id, anchors, created_at FROM refreshes WHERE id IN (${placeholders})`).all(...ids);
+    
+    const refreshes = rows.map(r => ({
+      id: r.id,
+      anchors: JSON.parse(r.anchors || '[]'),
+      created_at: r.created_at
+    }));
+    
+    res.json({ refreshes });
+  } catch (err) {
+    console.error('Error fetching refreshes batch:', err);
+    res.status(500).json({ error: 'Failed to fetch refreshes batch' });
+  }
+});
+
+// Legacy fetch all (still used by Atlas Engine on mount)
+app.get('/api/maps/:id/refreshes', async (req, res) => {
+  try {
+    const { id } = req.params;
+    // Find all unique refresh IDs used by this map's chunks
+    const chunkRows = db.prepare('SELECT data FROM chunks WHERE map_id = ?').all(id);
+    
+    const uniqueIds = new Set();
+    for (const row of chunkRows) {
+      if (row.data) {
+        const parsed = await parseChunkData(row.data);
+        if (parsed.refresh_ids) parsed.refresh_ids.forEach(rid => uniqueIds.add(rid));
+      }
+    }
+    
+    const ids = Array.from(uniqueIds);
+    if (ids.length === 0) return res.json({ refreshes: [] });
+    
+    const placeholders = ids.map(() => '?').join(',');
+    const rows = db.prepare(`SELECT id, anchors, created_at FROM refreshes WHERE id IN (${placeholders}) ORDER BY id ASC`).all(...ids);
+    
+    const refreshes = rows.map(r => ({
+      id: r.id,
+      anchors: JSON.parse(r.anchors || '[]'),
+      created_at: r.created_at
+    }));
+    
+    res.json({ refreshes });
+  } catch (err) {
+    console.error('Error fetching refreshes:', err);
+    res.status(500).json({ error: 'Failed to fetch refreshes' });
   }
 });
 

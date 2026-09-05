@@ -216,7 +216,7 @@ function getRiverValue(gx, gy, seed) {
    3. BIOME TABLE
    ============================================================ */
 
-const BIOME_LIST = [
+export const BIOME_LIST = [
   ["DEEP_OCEAN", "Deep Ocean", "#0a3854", 0, []],
   ["OCEAN", "Ocean", "#12588a", 0, []],
   ["ROCKY_SHORE", "Rocky Shore", "#7c8f86", 0.02, ["stone_small"]],
@@ -252,6 +252,75 @@ const BIOME_LIST = [
   ["STORMLANDS", "Stormlands", "#2a2830", 0.12, ["lightning_scorch", "rock"]],
   ["CRYSTAL_WASTES", "Crystal Wastes", "#2a1848", 0.28, ["crystal_cluster"]],
 ];
+
+export const BIOME_KEY_TO_ID = {};
+export const BIOME_ID_TO_KEY = {};
+BIOME_LIST.forEach((b, i) => {
+  BIOME_KEY_TO_ID[b[0]] = i;
+  BIOME_ID_TO_KEY[i] = b[0];
+});
+
+export function encodeAnchors(anchorsList) {
+  if (!anchorsList || anchorsList.length === 0) return [];
+  const output = [];
+  const unvisited = [...anchorsList];
+  
+  while(unvisited.length > 0) {
+    const startNode = unvisited.shift();
+    const biomeId = BIOME_KEY_TO_ID[startNode.biome];
+    if (biomeId === undefined) continue;
+    let currentX = startNode.cx;
+    let currentY = startNode.cy;
+    let seq = "";
+    
+    // Greedy snake path finding
+    let foundNext = true;
+    while(foundNext) {
+      foundNext = false;
+      const dirs = [[0, -1, '0'], [1, 0, '1'], [0, 1, '2'], [-1, 0, '3']];
+      for (const [dx, dy, code] of dirs) {
+        const nx = currentX + dx;
+        const ny = currentY + dy;
+        const idx = unvisited.findIndex(a => a.cx === nx && a.cy === ny && a.biome === startNode.biome);
+        if (idx !== -1) {
+          seq += code;
+          currentX = nx;
+          currentY = ny;
+          unvisited.splice(idx, 1);
+          foundNext = true;
+          break;
+        }
+      }
+    }
+    
+    output.push(`start:${startNode.cx};${startNode.cy},biome:${biomeId},seq:${seq}`);
+  }
+  return output;
+}
+
+export function decodeAnchors(encodedList) {
+  if (!encodedList || !Array.isArray(encodedList)) return [];
+  const anchors = [];
+  for (const str of encodedList) {
+    const match = str.match(/start:(-?\d+);(-?\d+),biome:(\d+),seq:([0-3]*)/);
+    if (!match) continue;
+    let cx = parseInt(match[1]);
+    let cy = parseInt(match[2]);
+    const biome = BIOME_ID_TO_KEY[parseInt(match[3])];
+    if (!biome) continue;
+    anchors.push({cx, cy, biome});
+    for (let i = 0; i < match[4].length; i++) {
+      const code = match[4][i];
+      if (code === '0') cy -= 1;
+      else if (code === '1') cx += 1;
+      else if (code === '2') cy += 1;
+      else if (code === '3') cx -= 1;
+      anchors.push({cx, cy, biome});
+    }
+  }
+  return anchors;
+}
+
 const B = {};
 BIOME_LIST.forEach((row, i) => { B[row[0]] = i; });
 const BIOME_DEFS = BIOME_LIST.map(([key, name, color, objectDensity, objectKinds]) => ({
@@ -263,7 +332,7 @@ const BIOME_DEFS = BIOME_LIST.map(([key, name, color, objectDensity, objectKinds
 // out since they're derived features, not sensible whole-chunk targets.
 const PAINTABLE_GROUPS = [
   ["Deep Ocean", ["DEEP_OCEAN"]],
-  ["Coast", ["OCEAN"]],
+  ["Coast", ["OCEAN", "BEACH"]],
   ["Temperate", ["PLAINS", "GRASSLAND", "FOREST", "DENSE_FOREST"]],
   ["Tropical", ["JUNGLE", "SAVANNAH", "SWAMP"]],
   ["Arid", ["DESERT", "ROCKY_DESERT", "OASIS", "CANYON"]],
@@ -278,6 +347,7 @@ const PAINTABLE_GROUPS = [
 const BIOME_PROFILES = {
   DEEP_OCEAN: { elevation: -0.65, temperature: 0, moisture: 0.5 },
   OCEAN: { elevation: -0.5, temperature: 0, moisture: 0.5 },
+  BEACH: { elevation: 0.03, temperature: 0.1, moisture: 0.5 },
   PLAINS: { elevation: 0.12, temperature: 0.1, moisture: 0.43 },
   GRASSLAND: { elevation: 0.12, temperature: 0.15, moisture: 0.58 },
   FOREST: { elevation: 0.15, temperature: -0.1, moisture: 0.75 },
@@ -440,7 +510,7 @@ function classifyLandBiome(gx, gy, seed, elevation, temperature, moisture, rarit
   return moisture < 0.96 ? B.SWAMP : B.MARSH;
 }
 
-function sampleTile(gx, gy, seed, anchors, chunkTiles, edgeBias) {
+function sampleTile(gx, gy, seed, anchors, chunkTiles) {
   const eff = computeAnchorEffect(gx, gy, anchors, chunkTiles);
   let elevation = clamp(getElevation(gx, gy, seed) + eff.elevBias, -1, 1);
   let temperature = getTemperature(gx, gy, seed, elevation);
@@ -454,16 +524,6 @@ function sampleTile(gx, gy, seed, anchors, chunkTiles, edgeBias) {
   }
   temperature = clamp(temperature, -1, 1);
   moisture = clamp(moisture, 0, 1);
-
-  // Blend with neighbor edge climate data for perfectly smooth chunk transitions
-  if (edgeBias && edgeBias.weight > 0) {
-    const ew = edgeBias.weight * Math.max(0, 1 - eff.rawPull);
-    if (ew > 0) {
-      elevation = clamp(elevation * (1 - ew) + edgeBias.elevation * ew, -1, 1);
-      temperature = clamp(temperature * (1 - ew) + edgeBias.temperature * ew, -1, 1);
-      moisture = clamp(moisture * (1 - ew) + edgeBias.moisture * ew, 0, 1);
-    }
-  }
 
   if (elevation < -0.32) {
     return { elevation, temperature, moisture, isRiver: false, isLake: false, biomeId: B.DEEP_OCEAN };
@@ -743,120 +803,8 @@ function drawObjectSprite(ctx, x, y, tilePx, obj) {
    5. CHUNK GENERATION
    ============================================================ */
 
-/**
- * Samples edge tiles of existing neighboring chunks to provide elevation,
- * temperature, and moisture data for smooth border transitions.
- */
-function getNeighborEdges(cx, cy, chunkTiles, existingChunks) {
-  const edges = {};
-  const north = existingChunks[`${cx},${cy - 1}`];
-  if (north) {
-    edges.north = [];
-    for (let i = 0; i < chunkTiles; i++) {
-      const idx = (chunkTiles - 1) * chunkTiles + i;
-      edges.north.push({
-        e: (north.elevations[idx] / 127.5) - 1,
-        t: (north.temperatures[idx] / 127.5) - 1,
-        m: north.moistures[idx] / 255
-      });
-    }
-  }
-  const south = existingChunks[`${cx},${cy + 1}`];
-  if (south) {
-    edges.south = [];
-    for (let i = 0; i < chunkTiles; i++) {
-      edges.south.push({
-        e: (south.elevations[i] / 127.5) - 1,
-        t: (south.temperatures[i] / 127.5) - 1,
-        m: south.moistures[i] / 255
-      });
-    }
-  }
-  const west = existingChunks[`${cx - 1},${cy}`];
-  if (west) {
-    edges.west = [];
-    for (let i = 0; i < chunkTiles; i++) {
-      const idx = i * chunkTiles + (chunkTiles - 1);
-      edges.west.push({
-        e: (west.elevations[idx] / 127.5) - 1,
-        t: (west.temperatures[idx] / 127.5) - 1,
-        m: west.moistures[idx] / 255
-      });
-    }
-  }
-  const east = existingChunks[`${cx + 1},${cy}`];
-  if (east) {
-    edges.east = [];
-    for (let i = 0; i < chunkTiles; i++) {
-      const idx = i * chunkTiles;
-      edges.east.push({
-        e: (east.elevations[idx] / 127.5) - 1,
-        t: (east.temperatures[idx] / 127.5) - 1,
-        m: east.moistures[idx] / 255
-      });
-    }
-  }
-  return edges;
-}
-
-/**
- * Computes an elevation/climate bias for a tile based on neighboring chunk edges.
- */
-function computeEdgeBias(tx, ty, chunkTiles, neighborEdges) {
-  const BLEND_DIST = Math.max(14, Math.floor(chunkTiles * 0.4));
-  let elevSum = 0, tempSum = 0, moistSum = 0, weightSum = 0, maxWeight = 0;
-
-  if (neighborEdges.north && ty < BLEND_DIST) {
-    const t = 1 - ty / BLEND_DIST;
-    const w = t * t * (3 - 2 * t);
-    elevSum += neighborEdges.north[tx].e * w;
-    tempSum += neighborEdges.north[tx].t * w;
-    moistSum += neighborEdges.north[tx].m * w;
-    weightSum += w;
-    maxWeight = Math.max(maxWeight, w);
-  }
-  if (neighborEdges.south && (chunkTiles - 1 - ty) < BLEND_DIST) {
-    const dist = chunkTiles - 1 - ty;
-    const t = 1 - dist / BLEND_DIST;
-    const w = t * t * (3 - 2 * t);
-    elevSum += neighborEdges.south[tx].e * w;
-    tempSum += neighborEdges.south[tx].t * w;
-    moistSum += neighborEdges.south[tx].m * w;
-    weightSum += w;
-    maxWeight = Math.max(maxWeight, w);
-  }
-  if (neighborEdges.west && tx < BLEND_DIST) {
-    const t = 1 - tx / BLEND_DIST;
-    const w = t * t * (3 - 2 * t);
-    elevSum += neighborEdges.west[ty].e * w;
-    tempSum += neighborEdges.west[ty].t * w;
-    moistSum += neighborEdges.west[ty].m * w;
-    weightSum += w;
-    maxWeight = Math.max(maxWeight, w);
-  }
-  if (neighborEdges.east && (chunkTiles - 1 - tx) < BLEND_DIST) {
-    const dist = chunkTiles - 1 - tx;
-    const t = 1 - dist / BLEND_DIST;
-    const w = t * t * (3 - 2 * t);
-    elevSum += neighborEdges.east[ty].e * w;
-    tempSum += neighborEdges.east[ty].t * w;
-    moistSum += neighborEdges.east[ty].m * w;
-    weightSum += w;
-    maxWeight = Math.max(maxWeight, w);
-  }
-
-  if (weightSum <= 0) return null;
-  return { 
-    elevation: elevSum / weightSum, 
-    temperature: tempSum / weightSum,
-    moisture: moistSum / weightSum,
-    weight: Math.min(0.85, maxWeight) 
-  };
-}
-
 function generateChunkData(cx, cy, world, existingChunks) {
   const { seed, chunkTiles, anchors = [] } = world;
-  const neighborEdges = getNeighborEdges(cx, cy, chunkTiles, existingChunks);
   const n = chunkTiles * chunkTiles;
   const biomes = new Array(n);
   const elevations = new Array(n);
@@ -869,8 +817,7 @@ function generateChunkData(cx, cy, world, existingChunks) {
   for (let ty = 0; ty < chunkTiles; ty++) {
     for (let tx = 0; tx < chunkTiles; tx++) {
       const gx = cx * chunkTiles + tx, gy = cy * chunkTiles + ty;
-      const edgeBias = computeEdgeBias(tx, ty, chunkTiles, neighborEdges);
-      const s = sampleTile(gx, gy, seed, anchors, chunkTiles, edgeBias);
+      const s = sampleTile(gx, gy, seed, anchors, chunkTiles);
       const idx = ty * chunkTiles + tx;
       biomes[idx] = s.biomeId;
       elevations[idx] = Math.round((s.elevation + 1) * 127.5);
@@ -1156,6 +1103,8 @@ export default function AtlasEngine() {
 
   // Backend save state
   const [mapId, setMapId] = useState(null);
+  const [isFrozen, setIsFrozen] = useState(false);
+  const [mapsList, setMapsList] = useState([]);
   const [savedKeys, setSavedKeys] = useState(new Set()); // keys already saved to backend
   const [saveMsg, setSaveMsg] = useState("");
 
@@ -1279,38 +1228,80 @@ export default function AtlasEngine() {
     setChunks(accChunks);
   }, [cells, seed, chunkTiles, chunks, anchors, paintBiome, pushUndo]);
 
-  const refreshVisible = useCallback(() => {
+  const refreshVisible = useCallback(async () => {
     const accChunks = { ...chunks };
     const toRemove = [];
     for (const { cx, cy } of cells) {
-      const key = `${cx},${cy}`;
-      if (!accChunks[key]) continue; // Only refresh chunks that are already generated
-      toRemove.push(key);
+      if (accChunks[`${cx},${cy}`]) toRemove.push(`${cx},${cy}`);
+    }
+    
+    let refreshId = null;
+    if (mapId && toRemove.length > 0) {
+      try {
+        const rRes = await fetch(`/api/maps/${mapId}/refresh`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ anchors: encodeAnchors(anchors) })
+        });
+        const rData = await rRes.json();
+        refreshId = rData.id;
+      } catch (e) {
+        console.warn("Failed to create refresh event", e);
+      }
+    }
+
+    for (const key of toRemove) {
+      const [cx, cy] = key.split(",").map(Number);
       const world = { seed, chunkTiles, anchors };
       const data = generateChunkData(cx, cy, world, accChunks);
       const thumb = makeThumbnail(data, chunkTiles);
       const painted = anchors.find(a => a.cx === cx && a.cy === cy)?.biome || null;
-      accChunks[key] = { ...data, thumb, generatedAt: Date.now(), paintedBiome: painted };
+      
+      const oldRefreshIds = accChunks[key].refresh_ids || [];
+      const nextRefreshIds = refreshId ? [...oldRefreshIds, refreshId] : oldRefreshIds;
+      
+      accChunks[key] = { ...data, thumb, generatedAt: Date.now(), paintedBiome: painted, refresh_ids: nextRefreshIds };
     }
+    
     if (toRemove.length > 0) {
       setSavedKeys((prev) => {
         const next = new Set(prev);
         toRemove.forEach((k) => next.delete(k));
         return next;
       });
+      setChunks(accChunks);
     }
-    setChunks(accChunks);
-  }, [cells, seed, chunkTiles, chunks, anchors]);
+  }, [cells, seed, chunkTiles, chunks, anchors, mapId]);
 
-  const refreshSelected = useCallback(() => {
+  const refreshSelected = useCallback(async () => {
     const key = `${selected.cx},${selected.cy}`;
     if (!chunks[key]) return;
+    
+    let refreshId = null;
+    if (mapId) {
+      try {
+        const rRes = await fetch(`/api/maps/${mapId}/refresh`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ anchors: encodeAnchors(anchors) })
+        });
+        const rData = await rRes.json();
+        refreshId = rData.id;
+      } catch (e) {
+        console.warn("Failed to create refresh event", e);
+      }
+    }
+
     const accChunks = { ...chunks };
     const world = { seed, chunkTiles, anchors };
     const data = generateChunkData(selected.cx, selected.cy, world, accChunks);
     const thumb = makeThumbnail(data, chunkTiles);
     const painted = anchors.find(a => a.cx === selected.cx && a.cy === selected.cy)?.biome || null;
-    accChunks[key] = { ...data, thumb, generatedAt: Date.now(), paintedBiome: painted };
+    
+    const oldRefreshIds = accChunks[key].refresh_ids || [];
+    const nextRefreshIds = refreshId ? [...oldRefreshIds, refreshId] : oldRefreshIds;
+
+    accChunks[key] = { ...data, thumb, generatedAt: Date.now(), paintedBiome: painted, refresh_ids: nextRefreshIds };
     
     setSavedKeys((prev) => {
       const next = new Set(prev);
@@ -1318,7 +1309,7 @@ export default function AtlasEngine() {
       return next;
     });
     setChunks(accChunks);
-  }, [selected, seed, chunkTiles, chunks, anchors]);
+  }, [selected, seed, chunkTiles, chunks, anchors, mapId]);
 
   const clearChunk = useCallback((cx, cy) => {
     const key = `${cx},${cy}`;
@@ -1376,43 +1367,95 @@ export default function AtlasEngine() {
   const chunkCount = Object.keys(chunks).length;
 
   // --- Backend Save/Load ---
-  // Initialize or create map on mount
+  const loadMap = useCallback(async (targetMapId) => {
+    try {
+      const mRes = await fetch('/api/maps');
+      const maps = await mRes.json();
+      const m = maps.find(x => x.id === targetMapId || x.mapId === targetMapId);
+      if (!m) return;
+      
+      setMapId(m.mapId || m.id);
+      setSeed(m.seed);
+      setSeedInput(String(m.seed));
+      setChunkTiles(m.chunkTiles || 50);
+      setIsFrozen(!!m.frozen);
+      
+      const cRes = await fetch(`/api/maps/${m.mapId || m.id}/chunks`);
+      const { chunks: stored } = await cRes.json();
+      
+      if (stored && Object.keys(stored).length > 0) {
+        // 1. Build anchors from chunks that have a target
+        const loadedAnchors = [];
+        for (const [key, data] of Object.entries(stored)) {
+          if (data.target !== null && data.target !== undefined) {
+            const biomeStr = BIOME_ID_TO_KEY[data.target];
+            if (biomeStr) {
+              const [cx, cy] = key.split(",").map(Number);
+              loadedAnchors.push({ cx, cy, biome: biomeStr });
+            }
+          }
+        }
+        setAnchors(loadedAnchors);
+        
+        // 2. Fetch refreshes to replay them correctly
+        const rRes = await fetch(`/api/maps/${m.mapId || m.id}/refreshes`);
+        const { refreshes } = await rRes.json();
+        const refreshMap = {};
+        refreshes.forEach(r => { refreshMap[r.id] = { ...r, anchors: decodeAnchors(r.anchors) }; });
+
+        // 3. Generate all chunks client-side using recipes
+        const loaded = {};
+        const sKeys = new Set();
+        for (const [key, data] of Object.entries(stored)) {
+          const [cx, cy] = key.split(",").map(Number);
+          
+          let chunkAnchors = loadedAnchors;
+          // If chunk was part of refreshes, use the anchors from its latest refresh
+          if (data.refresh_ids && data.refresh_ids.length > 0) {
+            const latestId = data.refresh_ids[data.refresh_ids.length - 1];
+            if (refreshMap[latestId]) {
+              chunkAnchors = refreshMap[latestId].anchors;
+            }
+          }
+          
+          const world = { seed: m.seed, chunkTiles: m.chunkTiles || 50, anchors: chunkAnchors };
+          // We pass an empty object for existingChunks, or loaded, since neighbor dependencies are removed/hash-based
+          const chunkData = generateChunkData(cx, cy, world, loaded);
+          const thumb = makeThumbnail(chunkData, m.chunkTiles || 50);
+          
+          const parsedTarget = data.target !== null && data.target !== undefined ? BIOME_ID_TO_KEY[data.target] : null;
+          loaded[key] = { ...chunkData, thumb, generatedAt: data.generatedAt || Date.now(), paintedBiome: parsedTarget, refresh_ids: data.refresh_ids || [] };
+          sKeys.add(key);
+        }
+        setChunks(loaded);
+        setSavedKeys(sKeys);
+      } else {
+        setChunks({});
+        setSavedKeys(new Set());
+        setAnchors([]);
+      }
+    } catch (e) {
+      console.warn("Failed to load map:", e);
+    }
+  }, []);
+
+  const didInit = useRef(false);
+  // Initialize maps list on mount
   useEffect(() => {
+    if (didInit.current) return;
+    didInit.current = true;
+
     (async () => {
       try {
         const res = await fetch("/api/maps");
         const maps = await res.json();
+        // maps API returns { mapId, seed, chunkTiles }
+        const mappedList = maps.map(m => ({ id: m.mapId || m.id, seed: m.seed }));
+        setMapsList(mappedList);
+        
         if (maps.length > 0) {
           // Load the most recent map
-          const m = maps[maps.length - 1];
-          setMapId(m.mapId);
-          setSeed(m.seed);
-          setSeedInput(String(m.seed));
-          setChunkTiles(m.chunkTiles || 50);
-          // Load stored chunks
-          const cRes = await fetch(`/api/maps/${m.mapId}/chunks`);
-          const { chunks: stored } = await cRes.json();
-          if (stored && Object.keys(stored).length > 0) {
-            // Regenerate thumbnails for loaded chunks
-            const loaded = {};
-            const sKeys = new Set();
-            for (const [key, data] of Object.entries(stored)) {
-              const thumb = makeThumbnail(data, m.chunkTiles || 50);
-              loaded[key] = { ...data, thumb, generatedAt: data.generatedAt || Date.now() };
-              sKeys.add(key);
-            }
-            setChunks(loaded);
-            setSavedKeys(sKeys);
-            // Restore anchors from loaded chunks
-            const loadedAnchors = [];
-            for (const [key, data] of Object.entries(loaded)) {
-              if (data.paintedBiome) {
-                const [cx, cy] = key.split(",").map(Number);
-                loadedAnchors.push({ cx, cy, biome: data.paintedBiome });
-              }
-            }
-            if (loadedAnchors.length > 0) setAnchors(loadedAnchors);
-          }
+          loadMap(maps[maps.length - 1].mapId || maps[maps.length - 1].id);
         } else {
           // Create a new map
           const createRes = await fetch("/api/maps", {
@@ -1422,44 +1465,51 @@ export default function AtlasEngine() {
           });
           const { mapId: newId } = await createRes.json();
           setMapId(newId);
+          setMapsList([{ id: newId, seed }]);
         }
       } catch (e) {
         console.warn("Backend not available, running in offline mode:", e.message);
       }
     })();
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [loadMap]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const saveCell = useCallback(async () => {
     if (!mapId) return;
+    if (!isFrozen) { setSaveMsg("Must Freeze to save"); setTimeout(() => setSaveMsg(""), 1500); return; }
     const key = `${selected.cx},${selected.cy}`;
     const chunk = chunks[key];
     if (!chunk || savedKeys.has(key)) return;
     try {
       setSaveMsg("Saving...");
+      // Save chunk recipe (convert painted biome string to integer ID for DB optimization)
+      const targetId = chunk.paintedBiome ? BIOME_KEY_TO_ID[chunk.paintedBiome] : null;
       const res = await fetch(`/api/maps/${mapId}/chunks/${key}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(chunk),
+        body: JSON.stringify({ target: targetId, refresh_ids: chunk.refresh_ids || [] }),
       });
+      
       const result = await res.json();
       if (result.saved) {
         setSavedKeys((prev) => new Set([...prev, key]));
-        setSaveMsg(`Saved (${(result.compressedSize / 1024).toFixed(1)} KB)`);
+        setSaveMsg("Saved");
       }
     } catch (e) {
       setSaveMsg("Save failed");
     }
     setTimeout(() => setSaveMsg(""), 2000);
-  }, [mapId, selected, chunks, savedKeys]);
+  }, [mapId, selected, chunks, savedKeys, isFrozen]);
 
   const saveVisible = useCallback(async () => {
     if (!mapId) return;
+    if (!isFrozen) { setSaveMsg("Must Freeze to save"); setTimeout(() => setSaveMsg(""), 1500); return; }
     const toSave = {};
     const newKeys = [];
     for (const { cx, cy } of cells) {
       const key = `${cx},${cy}`;
       if (chunks[key] && !savedKeys.has(key)) {
-        toSave[key] = chunks[key];
+        const targetId = chunks[key].paintedBiome ? BIOME_KEY_TO_ID[chunks[key].paintedBiome] : null;
+        toSave[key] = { target: targetId, refresh_ids: chunks[key].refresh_ids || [] };
         newKeys.push(key);
       }
     }
@@ -1471,16 +1521,49 @@ export default function AtlasEngine() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ chunks: toSave }),
       });
+      
       const result = await res.json();
       if (result.saved) {
         setSavedKeys((prev) => new Set([...prev, ...newKeys]));
-        setSaveMsg(`Saved ${result.count} chunks`);
+        setSaveMsg(`Saved ${result.count} recipes`);
       }
     } catch (e) {
       setSaveMsg("Save failed");
     }
     setTimeout(() => setSaveMsg(""), 2000);
-  }, [mapId, cells, chunks, savedKeys]);
+  }, [mapId, cells, chunks, savedKeys, isFrozen]);
+
+  const saveAll = useCallback(async () => {
+    if (!mapId) return;
+    if (!isFrozen) { setSaveMsg("Must Freeze to save"); setTimeout(() => setSaveMsg(""), 1500); return; }
+    const toSave = {};
+    const newKeys = [];
+    for (const key of Object.keys(chunks)) {
+      if (!savedKeys.has(key)) {
+        const targetId = chunks[key].paintedBiome ? BIOME_KEY_TO_ID[chunks[key].paintedBiome] : null;
+        toSave[key] = { target: targetId, refresh_ids: chunks[key].refresh_ids || [] };
+        newKeys.push(key);
+      }
+    }
+    if (Object.keys(toSave).length === 0) { setSaveMsg("Nothing new to save"); setTimeout(() => setSaveMsg(""), 1500); return; }
+    try {
+      setSaveMsg("Saving...");
+      const res = await fetch(`/api/maps/${mapId}/chunks-batch`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chunks: toSave }),
+      });
+      
+      const result = await res.json();
+      if (result.saved) {
+        setSavedKeys((prev) => new Set([...prev, ...newKeys]));
+        setSaveMsg(`Saved ${result.count} recipes`);
+      }
+    } catch (e) {
+      setSaveMsg("Save failed");
+    }
+    setTimeout(() => setSaveMsg(""), 2000);
+  }, [mapId, chunks, savedKeys, isFrozen]);
 
   // --- Keyboard Navigation ---
   const pan = useCallback((dx, dy) => setCenter((c) => ({ cx: c.cx + dx, cy: c.cy + dy })), []);
@@ -1544,6 +1627,27 @@ export default function AtlasEngine() {
           <span style={styles.wordmarkSub}>chunk-based world survey · relief + biome painting</span>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <span style={styles.label}>WORLD</span>
+          <select 
+            className="ae-select" 
+            style={{ width: 140 }}
+            value={mapId || ""}
+            onChange={(e) => {
+              if (e.target.value === "new") {
+                resetWorld();
+                setMapId(null);
+                setSaveMsg("Unsaved New Map");
+              } else {
+                loadMap(e.target.value);
+              }
+            }}
+          >
+            <option value="new">+ New World...</option>
+            {mapsList.map((m, i) => (
+              <option key={m.id || i} value={m.id}>{m.id?.slice(0,8)} (s: {m.seed})</option>
+            ))}
+          </select>
+          <div style={{ width: 1, height: 20, background: "#3a4046", margin: "0 4px" }} />
           <span style={styles.label}>SEED</span>
           <input
             className="ae-input"
@@ -1553,7 +1657,7 @@ export default function AtlasEngine() {
             onKeyDown={(e) => e.key === "Enter" && applySeedInput()}
           />
           <button className="ae-btn" onClick={applySeedInput}>Apply</button>
-          <button className="ae-btn" onClick={() => resetWorld()}>🎲 New World</button>
+          <button className="ae-btn" onClick={() => resetWorld()}>🎲 New</button>
           <div style={{ width: 1, height: 20, background: "#3a4046", margin: "0 4px" }} />
           <span style={styles.label}>CHUNK</span>
           <select
@@ -1567,6 +1671,32 @@ export default function AtlasEngine() {
             <option value={40}>40×40 tiles</option>
             <option value={50}>50×50 tiles</option>
           </select>
+          <div style={{ width: 1, height: 20, background: "#3a4046", margin: "0 4px" }} />
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#e7e2d3', fontSize: 12, fontFamily: 'Inter, sans-serif' }}>
+            <input 
+              type="checkbox" 
+              checked={isFrozen} 
+              onChange={async (e) => {
+                const frozenState = e.target.checked;
+                setIsFrozen(frozenState);
+                if (mapId) {
+                  try {
+                    await fetch(`/api/maps/${mapId}/frozen`, {
+                      method: "PUT",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ frozen: frozenState }),
+                    });
+                    if (frozenState) {
+                      loadMap(mapId);
+                    }
+                  } catch (err) {
+                    console.warn("Failed to save frozen state");
+                  }
+                }
+              }} 
+            />
+            Freeze
+          </label>
         </div>
       </div>
 
@@ -1575,6 +1705,14 @@ export default function AtlasEngine() {
         <div style={styles.panel}>
           <div style={styles.panelHeader}>
             <span>SURVEY CHART</span>
+            <button 
+              className="ae-btn" 
+              style={{ padding: "2px 8px", fontSize: 11, marginLeft: "auto", marginRight: 8, height: 20 }} 
+              onClick={saveAll} 
+              disabled={!mapId}
+            >
+              Save All
+            </button>
             <span style={styles.coordReadout}>center ({center.cx}, {center.cy})</span>
           </div>
 
@@ -1649,7 +1787,7 @@ export default function AtlasEngine() {
           </div>
           <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
             <button className="ae-btn" style={{ flex: 1 }} onClick={saveVisible} disabled={!mapId}>
-              💾 Save visible
+              Save visible
             </button>
             <button className="ae-btn" style={{ flex: 1 }} onClick={performUndo} disabled={undoStack.length === 0} title="Undo (Ctrl+Z)">
               ↩ Undo
@@ -1666,16 +1804,27 @@ export default function AtlasEngine() {
           </div>
 
           {showLegend && (
-            <div style={styles.legend} className="ae-scroll">
-              {BIOME_DEFS.map((b) => (
-                <div key={b.key} style={styles.legendRow}>
-                  <span style={{ ...styles.legendSwatch, background: b.color }} />
-                  <span>{b.name}</span>
+            <div style={styles.modalOverlay} onClick={() => setShowLegend(false)}>
+              <div style={styles.modalContent} onClick={(e) => e.stopPropagation()}>
+                <div style={styles.modalHeader}>
+                  <h3 style={{ margin: 0, fontSize: 14 }}>BIOME LEGEND</h3>
+                  <button className="ae-btn" style={{ padding: "4px 10px" }} onClick={() => setShowLegend(false)}>Close</button>
                 </div>
-              ))}
+                <div style={styles.legendGrid} className="ae-scroll">
+                  {BIOME_DEFS.map((b) => (
+                    <div key={b.key} style={styles.legendRow}>
+                      <span style={{ ...styles.legendSwatch, background: b.color }} />
+                      <span>{b.name}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
             </div>
           )}
 
+          <div style={styles.footnote}>
+            Rule 1. Generate 3 Neutral layer from existing chunks, before intended biome generation.<br/> Rule 2. If a empty box has 2 neighbour chunks, only neutral target be generated there, then rule 1
+          </div>
           <div style={styles.footnote}>
             {chunkCount} chunk{chunkCount === 1 ? "" : "s"} generated · seed {seed} · {anchors.length} biome anchor{anchors.length === 1 ? "" : "s"}
             {mapId && <> · map {mapId.slice(0, 8)}</>}
@@ -1836,9 +1985,24 @@ const styles = {
     position: "absolute", top: 3, left: 3, width: 6, height: 6, borderRadius: "50%",
     border: "1px solid rgba(255,255,255,0.7)", boxShadow: "0 0 3px rgba(0,0,0,0.6)",
   },
-  legend: {
-    marginTop: 10, maxHeight: 160, overflowY: "auto", display: "grid",
-    gridTemplateColumns: "1fr 1fr", gap: "4px 10px", padding: "10px 4px 2px", borderTop: "1px solid #2a2f33",
+  legendGrid: {
+    padding: "16px", overflowY: "auto", display: "grid",
+    gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: "8px 12px",
+  },
+  modalOverlay: {
+    position: "fixed", top: 0, left: 0, right: 0, bottom: 0,
+    background: "rgba(0, 0, 0, 0.7)", zIndex: 1000,
+    display: "flex", alignItems: "center", justifyContent: "center",
+  },
+  modalContent: {
+    background: "#1a1d20", border: "1px solid #2a2f33", borderRadius: 8,
+    width: "80%", maxWidth: 600, maxHeight: "80vh", display: "flex", flexDirection: "column",
+    boxShadow: "0 10px 30px rgba(0,0,0,0.5)",
+  },
+  modalHeader: {
+    display: "flex", justifyContent: "space-between", alignItems: "center",
+    padding: "12px 16px", borderBottom: "1px solid #2a2f33",
+    fontFamily: "'IBM Plex Mono', monospace", color: "#c98a3e",
   },
   legendRow: { display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "#c7c2b3" },
   legendSwatch: { width: 10, height: 10, borderRadius: 2, flexShrink: 0, border: "1px solid rgba(255,255,255,0.15)" },

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { Check, X, Eye, EyeOff } from "lucide-react";
+import { Check, X, Eye, EyeOff, ChevronDown } from "lucide-react";
 import bgImage from "./assets/Bg.png";
 
 // TAKEN_NAMES removed since we use the API backend bloom filter
@@ -22,6 +22,12 @@ export default function FlowEntry() {
   const [loginMode, setLoginMode] = useState(false);
   const [showPw, setShowPw] = useState(false);
   const [status, setStatus] = useState("idle"); // idle | checking | available | taken | invalid
+
+  // Map picker state
+  const [mapPickerMode, setMapPickerMode] = useState(false);
+  const [mapsList, setMapsList] = useState([]);
+  const [selectedMapId, setSelectedMapId] = useState("");
+
   const timer = useRef(null);
 
   useEffect(() => {
@@ -62,8 +68,10 @@ export default function FlowEntry() {
       navigate(`/register?name=${encodeURIComponent(trimmed)}`);
     } else if (status === "taken") {
       if (!loginMode) {
+        // Show password field
         setLoginMode(true);
-      } else {
+      } else if (!mapPickerMode) {
+        // Validate password, then show map picker
         try {
           const res = await fetch('/api/users/login', {
             method: 'POST',
@@ -76,10 +84,44 @@ export default function FlowEntry() {
             throw new Error(data.error || "Login failed");
           }
           
-          navigate(`/viewer?user=${encodeURIComponent(trimmed)}`);
+          // Password correct! Fetch maps list
+          const mapsRes = await fetch('/api/maps');
+          const maps = await mapsRes.json();
+          setMapsList(maps);
+          
+          // Pre-select the user's current map if they have one
+          const userRes = await fetch(`/api/users/${encodeURIComponent(trimmed)}`);
+          if (userRes.ok) {
+            const user = await userRes.json();
+            if (user.map_id) {
+              // User already has a map assigned, enter game directly!
+              navigate(`/viewer?user=${encodeURIComponent(trimmed)}`);
+              return;
+            }
+          }
+          
+          if (maps.length > 0) {
+            setSelectedMapId(maps[maps.length - 1].mapId || maps[maps.length - 1].id);
+          }
+          
+          setMapPickerMode(true);
         } catch (err) {
           console.error(err);
           alert(err.message);
+        }
+      } else {
+        // Map selected — update user's map_id and enter game
+        if (!selectedMapId) return;
+        try {
+          await fetch(`/api/users/${encodeURIComponent(trimmed)}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ map_id: selectedMapId })
+          });
+          navigate(`/viewer?user=${encodeURIComponent(trimmed)}`);
+        } catch (err) {
+          console.error(err);
+          alert("Failed to update map selection");
         }
       }
     }
@@ -88,10 +130,24 @@ export default function FlowEntry() {
   const statusCopy = {
     idle: "",
     invalid: "At least 3 characters",
-    checking: "Checking availability…",
-    available: "This name is free — claim it",
-    taken: "Someone already walks under that name, login if it's you",
+    checking: "Checking availability\u2026",
+    available: "This name is free \u2014 claim it",
+    taken: mapPickerMode 
+      ? "Pick a world to explore"
+      : "Someone already walks under that name, login if it\u2019s you",
   }[status];
+
+  const buttonLabel = status === "available" 
+    ? "Register" 
+    : mapPickerMode 
+      ? "Enter" 
+      : loginMode 
+        ? "Next" 
+        : "Login";
+
+  const buttonDisabled = !canProceed 
+    || (loginMode && !mapPickerMode && !password)
+    || (mapPickerMode && !selectedMapId);
 
   return (
     <div className="flow-root">
@@ -134,8 +190,25 @@ export default function FlowEntry() {
             <p className="prompt">Start your journey from the starting village</p>
 
             <div className="cta-row">
-              <div className={`name-field status-${status}`}>
-                {!loginMode ? (
+              <div className={`name-field status-${status}${mapPickerMode ? ' map-picker-field' : ''}`}>
+                {mapPickerMode ? (
+                  <div className="map-select-wrap">
+                    <select
+                      value={selectedMapId}
+                      onChange={(e) => setSelectedMapId(e.target.value)}
+                      className="map-select"
+                      autoFocus
+                    >
+                      <option value="" disabled>Select a world\u2026</option>
+                      {mapsList.map((m) => (
+                        <option key={m.mapId || m.id} value={m.mapId || m.id}>
+                          Map {m.mapId} {m.frozen ? "\uD83D\uDD12 Frozen" : "\uD83C\uDF31 Active"}
+                        </option>
+                      ))}
+                    </select>
+                    <ChevronDown size={16} className="select-chevron" />
+                  </div>
+                ) : !loginMode ? (
                   <input
                     type="text"
                     value={name}
@@ -159,7 +232,7 @@ export default function FlowEntry() {
                     autoFocus
                   />
                 )}
-                {status === "taken" && loginMode ? (
+                {status === "taken" && loginMode && !mapPickerMode ? (
                   <button
                     type="button"
                     className="eye-btn"
@@ -168,26 +241,26 @@ export default function FlowEntry() {
                   >
                     {showPw ? <EyeOff size={16} /> : <Eye size={16} />}
                   </button>
-                ) : (
+                ) : !mapPickerMode ? (
                   <span className="status-icon" aria-hidden="true">
                     {status === "checking" && <span className="spinner" />}
                     {status === "available" && <Check size={16} />}
                     {status === "taken" && !loginMode && <X size={16} />}
                   </span>
-                )}
+                ) : null}
               </div>
 
               <button
                 type="button"
                 className="begin-btn"
-                disabled={!canProceed || (loginMode && !password)}
+                disabled={buttonDisabled}
                 onClick={handleAction}
               >
-                {status === "available" ? "Register" : loginMode ? "Enter" : "Login"}
+                {buttonLabel}
               </button>
             </div>
 
-            <p className={`status-msg msg-${status}`} role="status">
+            <p className={`status-msg ${mapPickerMode ? 'msg-available' : `msg-${status}`}`} role="status">
               {statusCopy || "\u00A0"}
             </p>
           </main>
@@ -198,7 +271,7 @@ export default function FlowEntry() {
         <div className="stage loading-stage">
           <div className="loading-core">
             <span className="loading-ring" />
-            <p>Entering the village…</p>
+            <p>Entering the village\u2026</p>
           </div>
         </div>
       )}
@@ -218,7 +291,7 @@ export default function FlowEntry() {
                 setStatus("idle");
               }}
             >
-              ← Back
+              \u2190 Back
             </button>
           </div>
         </div>
@@ -444,6 +517,10 @@ const css = `
   border-color: var(--error);
 }
 
+.name-field.map-picker-field {
+  border-color: var(--cyan);
+}
+
 .name-field input {
   flex: 1;
   background: transparent;
@@ -466,6 +543,41 @@ const css = `
 .name-field input::placeholder {
   color: rgba(244, 236, 221, 0.45);
   font-weight: 500;
+}
+
+.map-select-wrap {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  position: relative;
+}
+
+.map-select {
+  width: 100%;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--parchment);
+  font-family: 'Manrope', sans-serif;
+  font-weight: 600;
+  font-size: 14px;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 24px;
+}
+
+.map-select option {
+  background: #1a1d24;
+  color: var(--parchment);
+}
+
+.select-chevron {
+  position: absolute;
+  right: 0;
+  pointer-events: none;
+  color: var(--slate);
 }
 
 .status-icon {
