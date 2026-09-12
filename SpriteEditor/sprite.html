@@ -316,6 +316,12 @@
             color: #105230;
         }
         
+        .panel-btn.active {
+            background: #105230;
+            border-color: #105230;
+            color: #fff;
+        }
+        
         .panel-content {
             padding: 12px;
         }
@@ -998,6 +1004,7 @@
                             <button class="panel-btn" onclick="app.moveFrameRight()" title="Move Frame Right">▶</button>
                             <button class="panel-btn" id="playBtn" onclick="app.toggleAnimation()" title="Play">⏵</button>
                             <button class="panel-btn" id="onionBtn" onclick="app.toggleOnionSkin()" title="Onion Skin">🧅</button>
+                            <button class="panel-btn" id="layerSyncBtn" onclick="app.toggleLayerSync()" title="Sync Layers">🔗</button>
                         </div>
                     </div>
                     <div class="panel-content">
@@ -1065,41 +1072,69 @@
         <!-- Keyboard Shortcuts Modal -->
         <div class="shortcuts-modal" id="shortcutsModal">
             <div class="shortcuts-content">
-                <!-- ... -->
-            <div class="shortcuts-header">
-                <span>KEYBOARD SHORTCUTS</span>
-                <button class="shortcuts-close" onclick="app.toggleShortcutsModal()">×</button>
+                <div class="shortcuts-header">
+                    <span>KEYBOARD SHORTCUTS</span>
+                    <button class="shortcuts-close" onclick="app.toggleShortcutsModal()">×</button>
+                </div>
+                <div class="shortcuts-body">
+                    <div class="shortcuts-section">
+                        <h3>Tools</h3>
+                        <div class="shortcut-item"><kbd>P</kbd> Pencil</div>
+                        <div class="shortcut-item"><kbd>E</kbd> Eraser</div>
+                        <div class="shortcut-item"><kbd>F</kbd> Fill</div>
+                        <div class="shortcut-item"><kbd>I</kbd> Eyedropper</div>
+                        <div class="shortcut-item"><kbd>L</kbd> Line</div>
+                        <div class="shortcut-item"><kbd>R</kbd> Rectangle</div>
+                        <div class="shortcut-item"><kbd>C</kbd> Circle</div>
+                        <div class="shortcut-item"><kbd>M</kbd> Mirror Pen</div>
+                        <div class="shortcut-item"><kbd>S</kbd> Rectangle Select</div>
+                        <div class="shortcut-item"><kbd>A</kbd> Lasso Select</div>
+                        <div class="shortcut-item"><kbd>D</kbd> Dither</div>
+                    </div>
+                    <div class="shortcuts-section">
+                        <h3>Edit</h3>
+                        <div class="shortcut-item"><kbd>Ctrl+Z</kbd> Undo</div>
+                        <div class="shortcut-item"><kbd>Ctrl+Y</kbd> Redo</div>
+                        <div class="shortcut-item"><kbd>Ctrl+C</kbd> Copy</div>
+                        <div class="shortcut-item"><kbd>Ctrl+V</kbd> Paste</div>
+                        <div class="shortcut-item"><kbd>Ctrl+X</kbd> Cut</div>
+                        <div class="shortcut-item"><kbd>Delete</kbd> Delete Selection</div>
+                        <div class="shortcut-item"><kbd>Escape</kbd> Cancel Selection</div>
+                    </div>
+                    <div class="shortcuts-section">
+                        <h3>View</h3>
+                        <div class="shortcut-item"><kbd>Scroll</kbd> Zoom In/Out</div>
+                        <div class="shortcut-item"><kbd>Tab</kbd> Toggle Preview</div>
+                        <div class="shortcut-item"><kbd>?</kbd> Show Shortcuts</div>
+                    </div>
+                </div>
             </div>
-            <div class="shortcuts-body">
-                <div class="shortcuts-section">
-                    <h3>Tools</h3>
-                    <div class="shortcut-item"><kbd>P</kbd> Pencil</div>
-                    <div class="shortcut-item"><kbd>E</kbd> Eraser</div>
-                    <div class="shortcut-item"><kbd>F</kbd> Fill</div>
-                    <div class="shortcut-item"><kbd>I</kbd> Eyedropper</div>
-                    <div class="shortcut-item"><kbd>L</kbd> Line</div>
-                    <div class="shortcut-item"><kbd>R</kbd> Rectangle</div>
-                    <div class="shortcut-item"><kbd>C</kbd> Circle</div>
-                    <div class="shortcut-item"><kbd>M</kbd> Mirror Pen</div>
-                    <div class="shortcut-item"><kbd>S</kbd> Rectangle Select</div>
-                    <div class="shortcut-item"><kbd>A</kbd> Lasso Select</div>
-                    <div class="shortcut-item"><kbd>D</kbd> Dither</div>
+        </div>
+        
+        <!-- Export Modal -->
+        <div class="shortcuts-modal" id="exportModal">
+            <div class="shortcuts-content">
+                <div class="shortcuts-header">
+                    <span>EXPORT SPRITE SHEET</span>
+                    <button class="shortcuts-close" onclick="document.getElementById('exportModal').classList.remove('visible')">×</button>
                 </div>
-                <div class="shortcuts-section">
-                    <h3>Edit</h3>
-                    <div class="shortcut-item"><kbd>Ctrl+Z</kbd> Undo</div>
-                    <div class="shortcut-item"><kbd>Ctrl+Y</kbd> Redo</div>
-                    <div class="shortcut-item"><kbd>Ctrl+C</kbd> Copy</div>
-                    <div class="shortcut-item"><kbd>Ctrl+V</kbd> Paste</div>
-                    <div class="shortcut-item"><kbd>Ctrl+X</kbd> Cut</div>
-                    <div class="shortcut-item"><kbd>Delete</kbd> Delete Selection</div>
-                    <div class="shortcut-item"><kbd>Escape</kbd> Cancel Selection</div>
-                </div>
-                <div class="shortcuts-section">
-                    <h3>View</h3>
-                    <div class="shortcut-item"><kbd>Scroll</kbd> Zoom In/Out</div>
-                    <div class="shortcut-item"><kbd>Tab</kbd> Toggle Preview</div>
-                    <div class="shortcut-item"><kbd>?</kbd> Show Shortcuts</div>
+                <div class="shortcuts-body" style="display: flex; flex-direction: column; gap: 10px;">
+                    <div>
+                        <label style="cursor: pointer; display: flex; align-items: center; gap: 8px;">
+                            <input type="radio" name="exportMode" value="normal" checked onchange="document.getElementById('exportLayersSelection').style.display='none'">
+                            Normal (All Visible Layers)
+                        </label>
+                    </div>
+                    <div>
+                        <label style="cursor: pointer; display: flex; align-items: center; gap: 8px;">
+                            <input type="radio" name="exportMode" value="layers" onchange="document.getElementById('exportLayersSelection').style.display='flex'; document.getElementById('exportLayersSelection').style.flexDirection='column'; document.getElementById('exportLayersSelection').style.gap='5px';">
+                            Selected Layers Only
+                        </label>
+                    </div>
+                    <div id="exportLayersSelection" style="display: none; border: 1px solid #3a3a3a; padding: 10px; border-radius: 4px; max-height: 150px; overflow-y: auto; background: #1e1e1e;">
+                        <!-- Checkboxes will be populated here -->
+                    </div>
+                    <button class="header-btn" style="margin-top: 10px; align-self: flex-end;" onclick="app.processSpriteSheetExport()">Export</button>
                 </div>
             </div>
         </div>
@@ -1126,6 +1161,7 @@
             animationInterval: null,
             fps: 12,
             onionSkinEnabled: false,
+            layerSyncEnabled: false,
             // Selection state (Aseprite-style)
             selection: null,           // { x, y, width, height } - selection bounds
             floatingSelection: null,   // { imageData, x, y } - content being moved
@@ -2300,6 +2336,52 @@
                 }
             },
 
+            toggleLayerSync() {
+                this.layerSyncEnabled = !this.layerSyncEnabled;
+                const btn = document.getElementById('layerSyncBtn');
+                
+                if (this.layerSyncEnabled) {
+                    btn.classList.add('active');
+                    const num = prompt("Enter number of layers to sync across all frames:", this.layers.length);
+                    const targetCount = parseInt(num);
+                    if (!isNaN(targetCount) && targetCount > 0) {
+                        this.syncAllLayers(targetCount);
+                    } else {
+                        // User cancelled or invalid input, turn it back off
+                        this.layerSyncEnabled = false;
+                        btn.classList.remove('active');
+                    }
+                } else {
+                    btn.classList.remove('active');
+                }
+            },
+            
+            syncAllLayers(targetCount) {
+                this.saveCurrentFrame();
+                
+                this.frames.forEach(frame => {
+                    // Remove excess layers
+                    while (frame.layers.length > targetCount) {
+                        frame.layers.pop();
+                    }
+                    // Add missing layers
+                    while (frame.layers.length < targetCount) {
+                        const canvas = document.createElement('canvas');
+                        canvas.width = this.canvasWidth;
+                        canvas.height = this.canvasHeight;
+                        frame.layers.push({
+                            canvas: canvas,
+                            visible: true,
+                            opacity: 1,
+                            name: `Layer ${frame.layers.length + 1}`
+                        });
+                    }
+                });
+                
+                this.loadFrame(this.currentFrameIndex);
+                this.updateLayersList();
+            },
+
             addLayer() {
                 const canvas = document.createElement('canvas');
                 canvas.width = this.canvasWidth;
@@ -2316,7 +2398,26 @@
                     opacity: 1,
                     name: `Layer ${num}`
                 };
+                
                 this.layers.push(layer);
+                
+                if (this.layerSyncEnabled) {
+                    this.saveCurrentFrame();
+                    this.frames.forEach((frame, idx) => {
+                        if (idx !== this.currentFrameIndex) {
+                            const newCanvas = document.createElement('canvas');
+                            newCanvas.width = this.canvasWidth;
+                            newCanvas.height = this.canvasHeight;
+                            frame.layers.push({
+                                canvas: newCanvas,
+                                visible: true,
+                                opacity: 1,
+                                name: layer.name
+                            });
+                        }
+                    });
+                }
+                
                 this.currentLayerIndex = this.layers.length - 1;
                 this.updateLayersList();
                 this.render();
@@ -2327,7 +2428,21 @@
                     alert('Cannot delete the last layer');
                     return;
                 }
-                this.layers.splice(this.currentLayerIndex, 1);
+                
+                const deletedIndex = this.currentLayerIndex;
+                this.layers.splice(deletedIndex, 1);
+                
+                if (this.layerSyncEnabled) {
+                    this.saveCurrentFrame();
+                    this.frames.forEach((frame, idx) => {
+                        if (idx !== this.currentFrameIndex) {
+                            if (frame.layers.length > 1 && deletedIndex < frame.layers.length) {
+                                frame.layers.splice(deletedIndex, 1);
+                            }
+                        }
+                    });
+                }
+                
                 this.currentLayerIndex = Math.min(this.currentLayerIndex, this.layers.length - 1);
                 this.updateLayersList();
                 this.render();
@@ -2873,7 +2988,48 @@
             },
 
             exportSpriteSheet() {
+                // Flush current working layers into frames before reading
                 this.saveCurrentFrame();
+                
+                // Populate layers selection
+                const layersDiv = document.getElementById('exportLayersSelection');
+                layersDiv.innerHTML = '';
+                
+                // Get unique layer names from current frame (source of truth after save)
+                const layerNames = new Set();
+                this.layers.forEach(l => layerNames.add(l.name));
+                
+                Array.from(layerNames).forEach(name => {
+                    const label = document.createElement('label');
+                    label.style.display = 'flex';
+                    label.style.alignItems = 'center';
+                    label.style.gap = '8px';
+                    label.style.cursor = 'pointer';
+                    
+                    const cb = document.createElement('input');
+                    cb.type = 'checkbox';
+                    cb.value = name;
+                    cb.checked = true;
+                    
+                    label.appendChild(cb);
+                    label.appendChild(document.createTextNode(name));
+                    layersDiv.appendChild(label);
+                });
+                
+                document.getElementById('exportModal').classList.add('visible');
+            },
+            
+            processSpriteSheetExport() {
+                document.getElementById('exportModal').classList.remove('visible');
+                this.saveCurrentFrame();
+                
+                const mode = document.querySelector('input[name="exportMode"]:checked').value;
+                const selectedLayers = new Set();
+                
+                if (mode === 'layers') {
+                    const checkboxes = document.querySelectorAll('#exportLayersSelection input[type="checkbox"]:checked');
+                    checkboxes.forEach(cb => selectedLayers.add(cb.value));
+                }
                 
                 const cols = Math.ceil(Math.sqrt(this.frames.length));
                 const rows = Math.ceil(this.frames.length / cols);
@@ -2888,9 +3044,17 @@
                     const y = Math.floor(i / cols) * this.canvasHeight;
                     
                     frame.layers.forEach(layer => {
-                        if (layer.visible) {
-                            ctx.globalAlpha = layer.opacity;
-                            ctx.drawImage(layer.canvas, x, y);
+                        if (mode === 'normal') {
+                            if (layer.visible) {
+                                ctx.globalAlpha = layer.opacity;
+                                ctx.drawImage(layer.canvas, x, y);
+                            }
+                        } else {
+                            // Only export checked layers (ignore visibility toggle in editor for this mode)
+                            if (selectedLayers.has(layer.name)) {
+                                ctx.globalAlpha = layer.opacity;
+                                ctx.drawImage(layer.canvas, x, y);
+                            }
                         }
                     });
                 });
