@@ -199,15 +199,22 @@
         .canvas-area {
             flex: 1;
             background: #1e1e1e;
-            display: flex;
-            align-items: center;
-            justify-content: center;
             position: relative;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .canvas-scroll-area {
+            flex: 1;
             overflow: auto;
+            display: flex;
             padding: 20px;
         }
         
         .canvas-wrapper {
+            margin: auto;
+            flex-shrink: 0;
             position: relative;
             box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
             border: 2px solid #2d2d2d;
@@ -468,19 +475,20 @@
         .preview-window {
             position: absolute;
             bottom: 40px;
-            right: 20px;
+            right: 12px;
             background: #1e1e1e;
             border: 1px solid #3a3a3a;
             border-radius: 6px;
             box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
             z-index: 100;
-            min-width: 80px;
+            min-width: 120px;
         }
         
         .preview-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
+            gap: 12px;
             padding: 4px 8px;
             background: #2a2a2a;
             border-bottom: 1px solid #3a3a3a;
@@ -951,9 +959,11 @@
             
             <!-- Canvas Area -->
             <div class="canvas-area">
-                <div class="canvas-wrapper">
-                    <canvas id="mainCanvas"></canvas>
-                    <canvas id="overlayCanvas" style="position: absolute; top: 0; left: 0; pointer-events: none;"></canvas>
+                <div class="canvas-scroll-area">
+                    <div class="canvas-wrapper">
+                        <canvas id="mainCanvas"></canvas>
+                        <canvas id="overlayCanvas" style="position: absolute; top: 0; left: 0; pointer-events: none;"></canvas>
+                    </div>
                 </div>
                 <div class="canvas-info">
                     <span id="canvasInfo">×27.43 [32×32] 1/1</span>
@@ -961,7 +971,10 @@
                 <div class="preview-window" id="previewWindow">
                     <div class="preview-header" id="previewHeader">
                         <span>PREVIEW</span>
-                        <button class="preview-close" onclick="app.togglePreviewWindow()" title="Collapse">−</button>
+                        <div class="preview-header-controls" style="display: flex; gap: 4px;">
+                            <button class="preview-close" onclick="app.resetPreviewPosition()" title="Reset Position">↺</button>
+                            <button class="preview-close" onclick="app.togglePreviewWindow()" title="Collapse">−</button>
+                        </div>
                     </div>
                     <div class="preview-content">
                         <canvas id="previewCanvas"></canvas>
@@ -1243,10 +1256,41 @@
                 this.previewCtx.globalAlpha = 1;
             },
             
+            resetPreviewPosition() {
+                const previewWindow = document.getElementById('previewWindow');
+                const canvasArea = document.querySelector('.canvas-area');
+                
+                // Add smooth transition
+                previewWindow.style.transition = 'left 0.3s ease, top 0.3s ease';
+                
+                // Calculate target left and top based on original right: 12px, bottom: 40px
+                const targetLeft = canvasArea.clientWidth - previewWindow.offsetWidth - 12;
+                const targetTop = canvasArea.clientHeight - previewWindow.offsetHeight - 40;
+                
+                // Detach from right/bottom to prevent stretching when left/top are set
+                previewWindow.style.right = 'auto';
+                previewWindow.style.bottom = 'auto';
+                
+                // Animate to target
+                previewWindow.style.left = targetLeft + 'px';
+                previewWindow.style.top = targetTop + 'px';
+                
+                // Remove transition after animation and reset properties so it stays pinned to bottom-right
+                if (this.resetTimeout) clearTimeout(this.resetTimeout);
+                this.resetTimeout = setTimeout(() => {
+                    if (this.isDraggingPreview) return;
+                    previewWindow.style.transition = '';
+                    previewWindow.style.left = '';
+                    previewWindow.style.top = '';
+                    previewWindow.style.right = '12px';
+                    previewWindow.style.bottom = '40px';
+                }, 300);
+            },
+            
             togglePreviewWindow() {
                 this.previewWindowVisible = !this.previewWindowVisible;
                 const previewWindow = document.getElementById('previewWindow');
-                const closeBtn = previewWindow.querySelector('.preview-close');
+                const closeBtn = previewWindow.querySelector('.preview-header-controls .preview-close:last-child');
                 
                 if (this.previewWindowVisible) {
                     previewWindow.classList.remove('collapsed');
@@ -1264,6 +1308,9 @@
                         document.getElementById('previewPlayBtn').classList.remove('active');
                     }
                 }
+                
+                // Smoothly reset position after toggling
+                this.resetPreviewPosition();
             },
             
             toggleShortcutsModal() {
@@ -1309,6 +1356,7 @@
                 header.addEventListener('mousedown', (e) => {
                     if (e.target.classList.contains('preview-close')) return;
                     this.isDraggingPreview = true;
+                    previewWindow.style.transition = ''; // Clear any active transitions for smooth dragging
                     const rect = previewWindow.getBoundingClientRect();
                     this.previewDragOffset = {
                         x: e.clientX - rect.left,
